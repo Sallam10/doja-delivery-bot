@@ -106,19 +106,24 @@ def fetch_orders(tag, token):
     return [e["node"] for e in (data.get("orders") or {}).get("edges", [])]
 
 def fulfill_order(order, token):
+    """Mark order fulfilled using fulfillment_orders REST API."""
     gid      = order.get("id", "")
     order_id = gid.split("/")[-1]
     if not order_id:
         return False
+    # Step 1: Get fulfillment orders
     url  = "https://{}/admin/api/{}/orders/{}/fulfillment_orders.json".format(
         SHOPIFY_STORE, SHOPIFY_API_VER, order_id)
     resp = requests.get(url, headers={"X-Shopify-Access-Token": token}, timeout=15)
     if not resp.ok:
+        print("Failed to get fulfillment_orders for {}: {} {}".format(order_id, resp.status_code, resp.text))
         return False
     fo_list  = resp.json().get("fulfillment_orders", [])
     open_fos = [fo["id"] for fo in fo_list if fo.get("status") == "open"]
     if not open_fos:
+        print("No open fulfillment orders for {}".format(order_id))
         return False
+    # Step 2: Create fulfillment
     payload = {"fulfillment": {"line_items_by_fulfillment_order":
                [{"fulfillment_order_id": fid} for fid in open_fos]}}
     r = requests.post(
@@ -127,6 +132,8 @@ def fulfill_order(order, token):
         headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
         timeout=15,
     )
+    if not r.ok:
+        print("Fulfillment failed for {}: {} {}".format(order_id, r.status_code, r.text))
     return r.ok
 
 # ── Transliteration ───────────────────────────────────────────────────────────

@@ -105,6 +105,39 @@ def fetch_orders(tag, token):
     data = result.get("data") or {}
     return [e["node"] for e in (data.get("orders") or {}).get("edges", [])]
 
+def fetch_untagged_unfulfilled(token, today_tag):
+    """Fetch unfulfilled orders that have NO Buunto delivery date tag."""
+    import re
+    date_pattern = re.compile(r"\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{4}\b")
+    q = """
+    query($q: String!) {
+      orders(first: 50, query: $q) {
+        edges { node {
+          id name displayFulfillmentStatus phone
+          totalPriceSet { shopMoney { amount } }
+          shippingAddress { name phone address1 address2 city }
+          customer { firstName lastName phone }
+          tags
+          lineItems(first: 10) { edges { node { title quantity variant { title } } } }
+        }}
+      }
+    }"""
+    # Fetch recent unfulfilled orders
+    result = shopify_gql(q, {"q": "fulfillment_status:unfulfilled"}, token=token)
+    if result.get("errors"):
+        return []
+    data  = result.get("data") or {}
+    nodes = [e["node"] for e in (data.get("orders") or {}).get("edges", [])]
+    # Keep only orders with NO Buunto date tag at all
+    untagged = []
+    for o in nodes:
+        tags = o.get("tags") or []
+        has_date_tag = any(date_pattern.search(t) for t in tags)
+        if not has_date_tag:
+            o["_no_date_warning"] = True
+            untagged.append(o)
+    return untagged
+
 def fulfill_order(order, token):
     """Mark order fulfilled using fulfillment_orders REST API."""
     gid      = order.get("id", "")
@@ -215,15 +248,19 @@ def fmt_pending(order, seq):
     phone = fmt_phone(sh.get("phone") or order.get("phone") or cu.get("phone", ""))
     total = str(round(float(
         order.get("totalPriceSet", {}).get("shopMoney", {}).get("amount", "0"))))
+    # Warning line for orders with no Buunto delivery date tag
+    warning = ""
+    if order.get("_no_date_warning"):
+        warning = "\n‼️‼️‼️‼️ لا يوجد تاريخ تسليم الرجوع لمدام رغدة ‼️‼️‼️‼️"
     return (
         "🛵 أوردر رقم: {}-{}\n"
-        "👤 اسم العميل: {}\n"
+        "👤 اسم العميل: {}{}\n"
         "📞 رقم التليفون: {}\n"
         "📍 العنوان: {}\n"
         "🛍️ الطلبات:{}\n"
         "💰 المبلغ المطلوب تحصيله: {} جنيه"
     ).format(str(seq).zfill(3), order_num(order.get("name", "")),
-             an, phone, addr, arabic_items(order), total)
+             an, warning, phone, addr, arabic_items(order), total)
 
 def fmt_fulfilled(order, seq):
     an = transliterate_batch([get_customer_name(order)])[0]
@@ -271,37 +308,46 @@ def send_cook(msg):
 
 # ── Main cron job ─────────────────────────────────────────────────────────────
 def run_cron():
-    token   = get_shopify_token()
-    today   = get_today_cairo()
-    tag     = buunto_tag(today)
-    orders  = fetch_orders(tag, token)
-    pending = [o for o in orders if o.get("displayFulfillmentStatus") != "FULFILLED"]
-    done    = [o for o in orders if o.get("displayFulfillmentStatus") == "FULFILLED"]
+    token    = get_shopify_token()
+    today    = get_today_cairo()
+    tag      = buunto_tag(today)
+    orders   = fetch_orders(tag, token)
+    pending  = [o for o in orders if o.get("displayFulfillmentStatus") != "FULFILLED"]
+    done     = [o for o in orders if o.get("displayFulfillmentStatus") == "FULFILLED"]
+
+    # Also fetch unfulfilled orders with no delivery date tag
+    untagged = fetch_untagged_unfulfilled(token, tag)
+    # Avoid duplicates (in case an order somehow appears in both)
+    tagged_ids = {o["id"] for o in orders}
+    untagged   = [o for o in untagged if o["id"] not in tagged_ids]
+
+    all_pending = pending + untagged
+    total_orders = orders or all_pending
 
     # Delivery group (Arabic)
     send_tg(arabic_date_header(today))
-    if not orders:
+    if not total_orders:
         send_tg("مفيش توصيلات النهارده 🎉")
     else:
-        for i, o in enumerate(pending, 1):
+        for i, o in enumerate(all_pending, 1):
             send_tg(fmt_pending(o, i))
-        for i, o in enumerate(done, len(pending) + 1):
+        for i, o in enumerate(done, len(all_pending) + 1):
             send_tg(fmt_fulfilled(o, i))
 
     # Cook group (English)
     send_cook("📦 Doja Cook — Orders for {}".format(
         today.strftime("%a %d %b %Y")))
-    if not orders:
+    if not total_orders:
         send_cook("No orders today 🎉")
     else:
-        for i, o in enumerate(pending, 1):
+        for i, o in enumerate(all_pending, 1):
             send_cook(fmt_cook(o, i))
 
-    # Mark pending as fulfilled in Shopify
-    for o in pending:
+    # Mark all pending as fulfilled in Shopify
+    for o in all_pending:
         fulfill_order(o, token)
 
-    return {"tag": tag, "pending": len(pending), "fulfilled": len(done)}
+    return {"tag": tag, "pending": len(pending), "untagged": len(untagged), "fulfilled": len(done)}
 
 # ── Vercel handler ────────────────────────────────────────────────────────────
 class handler(BaseHTTPRequestHandler):

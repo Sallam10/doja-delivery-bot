@@ -10,7 +10,8 @@ import anthropic
 ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-SHOPIFY_TOKEN      = os.environ.get("SHOPIFY_ACCESS_TOKEN", "")
+SHOPIFY_CLIENT_ID  = os.environ.get("SHOPIFY_CLIENT_ID", "")
+SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
 SHOPIFY_STORE      = "d0d0ba.myshopify.com"
 SHOPIFY_API_VER    = "2024-01"
 CAIRO_TZ           = timezone(timedelta(hours=2))
@@ -57,15 +58,30 @@ def buunto_tag(dt):
 def arabic_date_header(dt):
     return f"📦 أوردرات يوم {AR_DAYS[dt.weekday()]} {dt.day} {AR_MONTHS[dt.month-1]} {dt.year}"
 
-def shopify_gql(query, variables=None):
+def get_shopify_token():
+    """Exchange client credentials for a fresh OAuth access token (valid 24h)."""
+    resp = requests.post(
+        f"https://{SHOPIFY_STORE}/admin/oauth/access_token",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data={
+            "grant_type":    "client_credentials",
+            "client_id":     SHOPIFY_CLIENT_ID,
+            "client_secret": SHOPIFY_CLIENT_SECRET,
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+def shopify_gql(query, variables=None, token=None):
     url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VER}/graphql.json"
     resp = requests.post(url, json={"query": query, **({"variables": variables} if variables else {})},
-                         headers={"X-Shopify-Access-Token": SHOPIFY_TOKEN,
+                         headers={"X-Shopify-Access-Token": token,
                                   "Content-Type": "application/json"}, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
-def fetch_orders(tag):
+def fetch_orders(tag, token):
     q = """
     query($q: String!) {
       orders(first: 50, query: $q) {
@@ -79,10 +95,10 @@ def fetch_orders(tag):
         }}
       }
     }"""
-    result = shopify_gql(q, {"q": f'tag:"{tag}"'})
+    result = shopify_gql(q, {"q": f'tag:"{tag}"'}, token=token)
     return [e["node"] for e in result.get("data",{}).get("orders",{}).get("edges",[])]
 
-def fulfill_order(order):
+def fulfill_order(order, token):
     fo_edges = order.get("fulfillmentOrders",{}).get("edges",[])
     open_fo  = next((e["node"]["id"] for e in fo_edges if e["node"]["status"]=="OPEN"), None)
     if not open_fo:
@@ -94,7 +110,7 @@ def fulfill_order(order):
         userErrors { field message }
       }
     }"""
-    r = shopify_gql(mut, {"f": {"lineItemsByFulfillmentOrder":[{"fulfillmentOrderId": open_fo}]}})
+    r = shopify_gql(mut, {"f": {"lineItemsByFulfillmentOrder":[{"fulfillmentOrderId": open_fo}]}}, token=token)
     return len(r.get("data",{}).get("fulfillmentCreateV2",{}).get("userErrors",[])) == 0
 
 def has_latin(t):
@@ -188,9 +204,10 @@ def send_tg(msg):
                   json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
 
 def run_cron():
+    token   = get_shopify_token()          # fresh OAuth token, valid 24h
     today   = get_today_cairo()
     tag     = buunto_tag(today)
-    orders  = fetch_orders(tag)
+    orders  = fetch_orders(tag, token)
     pending = [o for o in orders if o.get("displayFulfillmentStatus") != "FULFILLED"]
     done    = [o for o in orders if o.get("displayFulfillmentStatus") == "FULFILLED"]
 
@@ -207,7 +224,7 @@ def run_cron():
         send_tg(fmt_fulfilled(o, i))
 
     for o in pending:
-        fulfill_order(o)
+        fulfill_order(o, token)
 
     return {"tag": tag, "pending": len(pending), "fulfilled": len(done)}
 

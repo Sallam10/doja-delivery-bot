@@ -91,7 +91,6 @@ def fetch_orders(tag, token):
           shippingAddress { name phone address1 address2 city }
           customer { firstName lastName phone }
           lineItems(first: 10) { edges { node { title quantity variant { title } } } }
-          fulfillmentOrders(first: 5) { edges { node { id status } } }
         }}
       }
     }"""
@@ -102,19 +101,39 @@ def fetch_orders(tag, token):
     return [e["node"] for e in (data.get("orders") or {}).get("edges", [])]
 
 def fulfill_order(order, token):
-    fo_edges = (order.get("fulfillmentOrders") or {}).get("edges", [])
-    open_fo  = next((e["node"]["id"] for e in fo_edges if e["node"]["status"]=="OPEN"), None)
-    if not open_fo:
+    """Mark order as fulfilled using REST API fulfillment_orders endpoint."""
+    # Extract numeric order ID from GID (e.g. "gid://shopify/Order/123" -> "123")
+    gid      = order.get("id", "")
+    order_id = gid.split("/")[-1]
+    if not order_id:
         return False
-    mut = """
-    mutation fulfillmentCreateV2($f: FulfillmentV2Input!) {
-      fulfillmentCreateV2(fulfillment: $f) {
-        fulfillment { id status }
-        userErrors { field message }
-      }
-    }"""
-    r = shopify_gql(mut, {"f": {"lineItemsByFulfillmentOrder":[{"fulfillmentOrderId": open_fo}]}}, token=token)
-    return len((r.get("data") or {}).get("fulfillmentCreateV2", {}).get("userErrors", [])) == 0
+
+    # Get fulfillment orders via REST
+    url  = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VER}/orders/{order_id}/fulfillment_orders.json"
+    resp = requests.get(url, headers={"X-Shopify-Access-Token": token}, timeout=15)
+    if not resp.ok:
+        return False
+
+    fo_list = resp.json().get("fulfillment_orders", [])
+    open_fos = [fo["id"] for fo in fo_list if fo.get("status") == "open"]
+    if not open_fos:
+        return False
+
+    # Create fulfillment via REST
+    fulfill_url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VER}/fulfillments.json"
+    payload = {
+        "fulfillment": {
+            "line_items_by_fulfillment_order": [
+                {"fulfillment_order_id": fo_id} for fo_id in open_fos
+            ]
+        }
+    }
+    r = requests.post(fulfill_url,
+                      json=payload,
+                      headers={"X-Shopify-Access-Token": token,
+                               "Content-Type": "application/json"},
+                      timeout=15)
+    return r.ok
 
 def has_latin(t):
     return bool(re.search(r"[a-zA-Z]", t or ""))

@@ -289,7 +289,10 @@ def fmt_cook(order, seq):
         else:
             lines.append("- {}x {}".format(qty, title))
     items_str = "\n".join(lines)
-    return "Order #{}-{}\nCustomer: {}\nItems:\n{}".format(seq_str, num, name, items_str)
+    warning = ""
+    if order.get("_no_date_warning"):
+        warning = "\n\u203c\ufe0f\u203c\ufe0f\u203c\ufe0f\u203c\ufe0f NO DELIVERY DATE \u2014 CHECK WITH RAGHDA \u203c\ufe0f\u203c\ufe0f\u203c\ufe0f\u203c\ufe0f"
+    return "Order #{}-{}\nCustomer: {}{}\nItems:\n{}".format(seq_str, num, name, warning, items_str)
 
 # ── Telegram senders ──────────────────────────────────────────────────────────
 def send_tg(msg):

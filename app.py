@@ -96,10 +96,13 @@ def fetch_orders(tag, token):
       }
     }"""
     result = shopify_gql(q, {"q": f'tag:"{tag}"'}, token=token)
-    return [e["node"] for e in result.get("data",{}).get("orders",{}).get("edges",[])]
+    if result.get("errors"):
+        raise Exception(f"GraphQL errors: {result['errors']}")
+    data = result.get("data") or {}
+    return [e["node"] for e in (data.get("orders") or {}).get("edges", [])]
 
 def fulfill_order(order, token):
-    fo_edges = order.get("fulfillmentOrders",{}).get("edges",[])
+    fo_edges = (order.get("fulfillmentOrders") or {}).get("edges", [])
     open_fo  = next((e["node"]["id"] for e in fo_edges if e["node"]["status"]=="OPEN"), None)
     if not open_fo:
         return False
@@ -111,7 +114,7 @@ def fulfill_order(order, token):
       }
     }"""
     r = shopify_gql(mut, {"f": {"lineItemsByFulfillmentOrder":[{"fulfillmentOrderId": open_fo}]}}, token=token)
-    return len(r.get("data",{}).get("fulfillmentCreateV2",{}).get("userErrors",[])) == 0
+    return len((r.get("data") or {}).get("fulfillmentCreateV2", {}).get("userErrors", [])) == 0
 
 def has_latin(t):
     return bool(re.search(r"[a-zA-Z]", t or ""))

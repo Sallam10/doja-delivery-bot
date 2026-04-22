@@ -257,15 +257,20 @@ def fmt_pending(order, seq):
     warning = ""
     if order.get("_no_date_warning"):
         warning = "\n‼️‼️‼️‼️ لا يوجد تاريخ تسليم الرجوع لمدام رغدة ‼️‼️‼️‼️"
+    # Payment line
+    if order.get("financialStatus") == "PAID":
+        payment_line = "💰 تم الدفع مسبقا"
+    else:
+        payment_line = "💰 المبلغ المطلوب تحصيله: {} جنيه".format(total)
     return (
         "🛵 أوردر رقم: {}-{}\n"
         "👤 اسم العميل: {}{}\n"
         "📞 رقم التليفون: {}\n"
         "📍 العنوان: {}\n"
         "🛍️ الطلبات:{}\n"
-        "💰 المبلغ المطلوب تحصيله: {} جنيه"
+        "{}"
     ).format(str(seq).zfill(3), order_num(order.get("name", "")),
-             an, warning, phone, addr, arabic_items(order), total)
+             an, warning, phone, addr, arabic_items(order), payment_line)
 
 def fmt_fulfilled(order, seq):
     an = transliterate_batch([get_customer_name(order)])[0]

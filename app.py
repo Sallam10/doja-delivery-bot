@@ -91,7 +91,7 @@ def fetch_orders(tag, token):
     query($q: String!) {
       orders(first: 50, query: $q) {
         edges { node {
-          id name displayFulfillmentStatus financialStatus phone
+          id name displayFulfillmentStatus displayFinancialStatus phone
           totalPriceSet { shopMoney { amount } }
           shippingAddress { name phone address1 address2 city }
           customer { firstName lastName phone }
@@ -105,7 +105,7 @@ def fetch_orders(tag, token):
     data  = result.get("data") or {}
     nodes = [e["node"] for e in (data.get("orders") or {}).get("edges", [])]
     # Ignore voided and refunded orders
-    return [o for o in nodes if o.get("financialStatus") not in ("VOIDED", "REFUNDED")]
+    return [o for o in nodes if o.get("displayFinancialStatus") not in ("VOIDED", "REFUNDED")]
 
 def fetch_untagged_unfulfilled(token, today_tag):
     """Fetch unfulfilled orders that have NO Buunto delivery date tag."""
@@ -115,7 +115,7 @@ def fetch_untagged_unfulfilled(token, today_tag):
     query($q: String!) {
       orders(first: 50, query: $q) {
         edges { node {
-          id name displayFulfillmentStatus financialStatus phone
+          id name displayFulfillmentStatus displayFinancialStatus phone
           totalPriceSet { shopMoney { amount } }
           shippingAddress { name phone address1 address2 city }
           customer { firstName lastName phone }
@@ -134,7 +134,7 @@ def fetch_untagged_unfulfilled(token, today_tag):
     IGNORED_STATUSES = {"VOIDED", "REFUNDED"}
     untagged = []
     for o in nodes:
-        if o.get("financialStatus") in IGNORED_STATUSES:
+        if o.get("displayFinancialStatus") in IGNORED_STATUSES:
             continue
         tags = o.get("tags") or []
         has_date_tag = any(date_pattern.search(t) for t in tags)
@@ -258,7 +258,7 @@ def fmt_pending(order, seq):
     if order.get("_no_date_warning"):
         warning = "\n‼️‼️‼️‼️ لا يوجد تاريخ تسليم الرجوع لمدام رغدة ‼️‼️‼️‼️"
     # Payment line
-    if order.get("financialStatus") == "PAID":
+    if order.get("displayFinancialStatus") == "PAID":
         payment_line = "💰 تم الدفع مسبقا"
     else:
         payment_line = "💰 المبلغ المطلوب تحصيله: {} جنيه".format(total)

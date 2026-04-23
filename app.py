@@ -320,6 +320,42 @@ def send_cook(msg):
     )
 
 # ── Main cron job ─────────────────────────────────────────────────────────────
+def run_backup():
+    """
+    Backup message: manually triggered.
+    Scans today's PAID + FULFILLED orders and sends
+    the standard message to both groups with تم الدفع مسبقا.
+    Does NOT change any fulfillment status in Shopify.
+    """
+    token   = get_shopify_token()
+    today   = get_today_cairo()
+    tag     = buunto_tag(today)
+    orders  = fetch_orders(tag, token)
+
+    # Only PAID + FULFILLED orders
+    backup_orders = [
+        o for o in orders
+        if o.get("displayFulfillmentStatus") == "FULFILLED"
+        and o.get("displayFinancialStatus") == "PAID"
+    ]
+
+    if not backup_orders:
+        send_tg("لا يوجد أوردرات مدفوعة ومسلمة اليوم")
+        send_cook("No paid & fulfilled orders found for today.")
+        return {"tag": tag, "backup_sent": 0}
+
+    # Send date header
+    send_tg(arabic_date_header(today))
+    send_cook("📦 Doja Cook — Backup Messages for {}".format(today.strftime("%a %d %b %Y")))
+
+    # Send each order as standard message — fmt_pending always shows
+    # تم الدفع مسبقا when displayFinancialStatus == PAID
+    for i, o in enumerate(backup_orders, 1):
+        send_tg(fmt_pending(o, i))
+        send_cook(fmt_cook(o, i))
+
+    return {"tag": tag, "backup_sent": len(backup_orders)}
+
 def run_cron():
     token    = get_shopify_token()
     today    = get_today_cairo()
@@ -372,8 +408,14 @@ class handler(BaseHTTPRequestHandler):
                 self._respond(200, result)
             except Exception as e:
                 self._respond(500, {"error": str(e)})
+        elif path == "/api/backup":
+            try:
+                result = run_backup()
+                self._respond(200, result)
+            except Exception as e:
+                self._respond(500, {"error": str(e)})
         else:
-            self._respond(200, {"status": "Doja Delivery Bot running", "trigger": "/api/cron"})
+            self._respond(200, {"status": "Doja Delivery Bot running", "trigger": "/api/cron", "backup": "/api/backup"})
 
     def do_POST(self):
         self.do_GET()

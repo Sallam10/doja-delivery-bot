@@ -212,7 +212,7 @@ def fmt_phone(raw):
     elif p.startswith("0020"):     p = p[4:]
     elif p.startswith("20") and len(p) > 10: p = p[2:]
     elif p.startswith("0"):        p = p[1:]
-    return "\u200e+20 {}".format(p)
+    return "+20{}".format(p)
 
 def map_product(title):
     lo = title.lower()

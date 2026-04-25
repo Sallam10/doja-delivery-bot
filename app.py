@@ -3,6 +3,7 @@ import re
 import json
 import requests
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler
 import anthropic
 
@@ -15,7 +16,7 @@ SHOPIFY_CLIENT_ID     = os.environ.get("SHOPIFY_CLIENT_ID", "")
 SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
 SHOPIFY_STORE         = "d0d0ba.myshopify.com"
 SHOPIFY_API_VER       = "2024-01"
-CAIRO_TZ              = timezone(timedelta(hours=2))
+CAIRO_TZ              = ZoneInfo("Africa/Cairo")  # handles DST automatically
 
 AR_DAYS   = ["الاثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت","الأحد"]
 AR_MONTHS = ["يناير","فبراير","مارس","أبريل","مايو","يونيو",
@@ -54,6 +55,10 @@ NAME_EXAMPLES = (
 # ── Date helpers ──────────────────────────────────────────────────────────────
 def get_today_cairo():
     return datetime.now(CAIRO_TZ)
+
+def get_delivery_date():
+    """Returns tomorrow's date in Cairo time — used for fetching next-day delivery orders."""
+    return datetime.now(CAIRO_TZ) + timedelta(days=1)
 
 def buunto_tag(dt):
     return "{} {} {} {}".format(EN_DAYS[dt.weekday()], EN_MONTHS[dt.month-1], dt.day, dt.year)
@@ -357,10 +362,11 @@ def run_backup():
     return {"tag": tag, "backup_sent": len(backup_orders)}
 
 def run_cron():
-    token    = get_shopify_token()
-    today    = get_today_cairo()
-    tag      = buunto_tag(today)
-    orders   = fetch_orders(tag, token)
+    token         = get_shopify_token()
+    today         = get_today_cairo()       # actual current date (for header display)
+    delivery_date = get_delivery_date()     # tomorrow — the date drivers deliver
+    tag           = buunto_tag(delivery_date)
+    orders        = fetch_orders(tag, token)
     pending  = [o for o in orders if o.get("displayFulfillmentStatus") != "FULFILLED"]
     done     = [o for o in orders if o.get("displayFulfillmentStatus") == "FULFILLED"]
 
@@ -374,7 +380,7 @@ def run_cron():
     total_orders = orders or all_pending
 
     # Delivery group (Arabic)
-    send_tg(arabic_date_header(today))
+    send_tg(arabic_date_header(delivery_date))
     if not total_orders:
         send_tg("مفيش توصيلات النهارده 🎉")
     else:
@@ -385,7 +391,7 @@ def run_cron():
 
     # Cook group (English)
     send_cook("📦 Doja Cook — Orders for {}".format(
-        today.strftime("%a %d %b %Y")))
+        delivery_date.strftime("%a %d %b %Y")))
     if not total_orders:
         send_cook("No orders today 🎉")
     else:
@@ -396,7 +402,7 @@ def run_cron():
     for o in all_pending:
         fulfill_order(o, token)
 
-    return {"tag": tag, "pending": len(pending), "untagged": len(untagged), "fulfilled": len(done)}
+    return {"delivery_date": tag, "pending": len(pending), "untagged": len(untagged), "fulfilled": len(done)}
 
 # ── Vercel handler ────────────────────────────────────────────────────────────
 class handler(BaseHTTPRequestHandler):

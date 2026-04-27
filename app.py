@@ -141,12 +141,12 @@ def classify_order(order, target_iso, target_buunto):
       is_no_date_warning — True if no delivery date found at all (Raghda warning)
     Checks new theme customAttributes first, falls back to Buunto tags.
     """
-    delivery_date_new = get_note_attribute(order, "delivery_date")
+    delivery_date_new = get_note_attribute(order, "doja_date")
 
     if delivery_date_new:
         # New theme order — derive fulfillment_type from delivery_choice key
         has_matching_date  = (delivery_date_new == target_iso)
-        delivery_choice    = get_note_attribute(order, "delivery_choice") or ""
+        delivery_choice    = get_note_attribute(order, "doja_choice") or ""
         if "pickup" in delivery_choice.lower():
             fulfillment_type = "pickup"
         else:

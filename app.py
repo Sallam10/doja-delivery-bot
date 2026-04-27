@@ -146,12 +146,9 @@ def classify_order(order, target_iso, target_buunto):
       delivery_date:   "2026-04-30"   (used by east/west delivery orders)
       doja_date:       "2026-04-30"   (used by pickup orders)
     """
-    # Read date — delivery orders use "delivery_date", pickup uses "doja_date"
-    delivery_date_new = (
-        get_note_attribute(order, "delivery_date") or
-        get_note_attribute(order, "doja_date")
-    )
-    # Read choice key
+    # All new theme orders use "delivery_date" for the date
+    delivery_date_new = get_note_attribute(order, "delivery_date")
+    # All new theme orders use "delivery_choice" to distinguish pickup vs delivery
     delivery_choice = get_note_attribute(order, "delivery_choice") or ""
 
     if delivery_date_new or delivery_choice:

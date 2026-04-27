@@ -144,9 +144,13 @@ def classify_order(order, target_iso, target_buunto):
     delivery_date_new = get_note_attribute(order, "delivery_date")
 
     if delivery_date_new:
-        # New theme order
+        # New theme order — derive fulfillment_type from delivery_choice key
         has_matching_date  = (delivery_date_new == target_iso)
-        fulfillment_type   = get_note_attribute(order, "fulfillment_type") or "delivery"
+        delivery_choice    = get_note_attribute(order, "delivery_choice") or ""
+        if "pickup" in delivery_choice.lower():
+            fulfillment_type = "pickup"
+        else:
+            fulfillment_type = "delivery"
         is_no_date_warning = False
     else:
         # Old theme / Buunto order

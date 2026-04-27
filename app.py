@@ -52,16 +52,26 @@ NAME_EXAMPLES = (
     '"Omar"->"عمر" | "Nour"->"نور" | "Laila"->"ليلى"'
 )
 
+# Buunto date tag pattern for fallback detection
+BUUNTO_DATE_RE = re.compile(
+    r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{4}$"
+)
+
 # ── Date helpers ──────────────────────────────────────────────────────────────
 def get_today_cairo():
     return datetime.now(CAIRO_TZ)
 
 def get_delivery_date():
-    """Returns tomorrow's date in Cairo time — used for fetching next-day delivery orders."""
+    """Returns tomorrow's date in Cairo time."""
     return datetime.now(CAIRO_TZ) + timedelta(days=1)
 
 def buunto_tag(dt):
+    """Format: 'Mon Apr 27 2026' — old Buunto tag format."""
     return "{} {} {} {}".format(EN_DAYS[dt.weekday()], EN_MONTHS[dt.month-1], dt.day, dt.year)
+
+def iso_date(dt):
+    """Format: '2026-04-27' — new theme note_attribute format."""
+    return dt.strftime("%Y-%m-%d")
 
 def arabic_date_header(dt):
     return "📦 أوردرات يوم {} {} {} {}".format(
@@ -91,20 +101,22 @@ def shopify_gql(query, variables=None, token=None):
     resp.raise_for_status()
     return resp.json()
 
-def fetch_orders(tag, token):
+def fetch_orders_raw(query_str, token):
+    """Fetch orders matching a GraphQL query string. Returns raw nodes."""
     q = """
     query($q: String!) {
       orders(first: 50, query: $q) {
         edges { node {
-          id name displayFulfillmentStatus displayFinancialStatus phone
+          id name displayFulfillmentStatus displayFinancialStatus phone tags
           totalPriceSet { shopMoney { amount } }
           shippingAddress { name phone address1 address2 city }
           customer { firstName lastName phone }
+          customAttributes { key value }
           lineItems(first: 10) { edges { node { title quantity variant { title } } } }
         }}
       }
     }"""
-    result = shopify_gql(q, {"q": 'tag:"{}"'.format(tag)}, token=token)
+    result = shopify_gql(q, {"q": query_str}, token=token)
     if result.get("errors"):
         raise Exception("GraphQL errors: {}".format(result["errors"]))
     data  = result.get("data") or {}
@@ -112,41 +124,50 @@ def fetch_orders(tag, token):
     # Ignore voided and refunded orders
     return [o for o in nodes if o.get("displayFinancialStatus") not in ("VOIDED", "REFUNDED")]
 
-def fetch_untagged_unfulfilled(token, today_tag):
-    """Fetch unfulfilled orders that have NO Buunto delivery date tag."""
-    import re
-    date_pattern = re.compile(r"\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{4}\b")
-    q = """
-    query($q: String!) {
-      orders(first: 50, query: $q) {
-        edges { node {
-          id name displayFulfillmentStatus displayFinancialStatus phone
-          totalPriceSet { shopMoney { amount } }
-          shippingAddress { name phone address1 address2 city }
-          customer { firstName lastName phone }
-          tags
-          lineItems(first: 10) { edges { node { title quantity variant { title } } } }
-        }}
-      }
-    }"""
-    # Fetch recent unfulfilled orders
-    result = shopify_gql(q, {"q": "fulfillment_status:unfulfilled"}, token=token)
-    if result.get("errors"):
-        return []
-    data  = result.get("data") or {}
-    nodes = [e["node"] for e in (data.get("orders") or {}).get("edges", [])]
-    # Keep only orders with NO Buunto date tag AND valid payment status
-    IGNORED_STATUSES = {"VOIDED", "REFUNDED"}
-    untagged = []
-    for o in nodes:
-        if o.get("displayFinancialStatus") in IGNORED_STATUSES:
-            continue
-        tags = o.get("tags") or []
-        has_date_tag = any(date_pattern.search(t) for t in tags)
-        if not has_date_tag:
-            o["_no_date_warning"] = True
-            untagged.append(o)
-    return untagged
+# ── note_attribute helper ─────────────────────────────────────────────────────
+def get_note_attribute(order, key):
+    """Read a value from order.customAttributes (GraphQL name for note_attributes)."""
+    for attr in order.get("customAttributes", []) or []:
+        if attr.get("key") == key:
+            return attr.get("value")
+    return None
+
+# ── Bilingual order classification ────────────────────────────────────────────
+def classify_order(order, target_iso, target_buunto):
+    """
+    Returns a dict with:
+      has_matching_date  — True if this order is for the target delivery date
+      fulfillment_type   — "delivery" or "pickup"
+      is_no_date_warning — True if no delivery date found at all (Raghda warning)
+    Checks new theme customAttributes first, falls back to Buunto tags.
+    """
+    delivery_date_new = get_note_attribute(order, "delivery_date")
+
+    if delivery_date_new:
+        # New theme order
+        has_matching_date  = (delivery_date_new == target_iso)
+        fulfillment_type   = get_note_attribute(order, "fulfillment_type") or "delivery"
+        is_no_date_warning = False
+    else:
+        # Old theme / Buunto order
+        tags_str = order.get("tags") or ""
+        # tags can be a list or comma-separated string depending on API version
+        if isinstance(tags_str, list):
+            tags_list = [t.strip() for t in tags_str]
+            tags_str  = ", ".join(tags_list)
+        else:
+            tags_list = [t.strip() for t in tags_str.split(",")]
+
+        has_matching_date  = (target_buunto in tags_str)
+        fulfillment_type   = "delivery"
+        has_buunto_date    = any(BUUNTO_DATE_RE.match(t) for t in tags_list)
+        is_no_date_warning = not has_buunto_date
+
+    return {
+        "has_matching_date":  has_matching_date,
+        "fulfillment_type":   fulfillment_type,
+        "is_no_date_warning": is_no_date_warning,
+    }
 
 def fulfill_order(order, token):
     """Mark order fulfilled using fulfillment_orders REST API."""
@@ -154,7 +175,6 @@ def fulfill_order(order, token):
     order_id = gid.split("/")[-1]
     if not order_id:
         return False
-    # Step 1: Get open fulfillment orders
     url  = "https://{}/admin/api/{}/orders/{}/fulfillment_orders.json".format(
         SHOPIFY_STORE, SHOPIFY_API_VER, order_id)
     resp = requests.get(url, headers={"X-Shopify-Access-Token": token}, timeout=15)
@@ -164,7 +184,6 @@ def fulfill_order(order, token):
     open_fos = [fo["id"] for fo in fo_list if fo.get("status") == "open"]
     if not open_fos:
         return False
-    # Step 2: Create fulfillment
     payload = {"fulfillment": {"line_items_by_fulfillment_order":
                [{"fulfillment_order_id": fid} for fid in open_fos]}}
     r = requests.post(
@@ -236,7 +255,7 @@ def get_customer_name(order):
     cu = order.get("customer") or {}
     return sh.get("name") or (cu.get("firstName", "") + " " + cu.get("lastName", "")).strip()
 
-# ── Delivery group messages (Arabic) ─────────────────────────────────────────
+# ── Arabic items list ─────────────────────────────────────────────────────────
 def arabic_items(order):
     out = ""
     for e in order.get("lineItems", {}).get("edges", []):
@@ -246,6 +265,7 @@ def arabic_items(order):
         out += "\n- {}x {} {}".format(n.get("quantity", 1), ar, sz).rstrip()
     return out
 
+# ── Delivery group messages (Arabic) ─────────────────────────────────────────
 def fmt_pending(order, seq):
     sh    = order.get("shippingAddress") or {}
     cu    = order.get("customer") or {}
@@ -258,11 +278,9 @@ def fmt_pending(order, seq):
     phone = fmt_phone(sh.get("phone") or order.get("phone") or cu.get("phone", ""))
     total = str(round(float(
         order.get("totalPriceSet", {}).get("shopMoney", {}).get("amount", "0"))))
-    # Warning line for orders with no Buunto delivery date tag
     warning = ""
     if order.get("_no_date_warning"):
         warning = "\n‼️‼️‼️‼️ لا يوجد تاريخ تسليم الرجوع لمدام رغدة ‼️‼️‼️‼️"
-    # Payment line
     if order.get("displayFinancialStatus") == "PAID":
         payment_line = "💰 تم الدفع مسبقا"
     else:
@@ -289,7 +307,7 @@ def fmt_fulfilled(order, seq):
              an, arabic_items(order))
 
 # ── Cook group messages (English) ─────────────────────────────────────────────
-def fmt_cook(order, seq):
+def fmt_cook(order, seq, fulfillment_type="delivery"):
     name    = get_customer_name(order)
     seq_str = str(seq).zfill(3)
     num     = order_num(order.get("name", ""))
@@ -307,7 +325,9 @@ def fmt_cook(order, seq):
     warning = ""
     if order.get("_no_date_warning"):
         warning = "\n\u203c\ufe0f\u203c\ufe0f\u203c\ufe0f\u203c\ufe0f NO DELIVERY DATE \u2014 CHECK WITH RAGHDA \u203c\ufe0f\u203c\ufe0f\u203c\ufe0f\u203c\ufe0f"
-    return "Order #{}-{}\nCustomer: {}{}\nItems:\n{}".format(seq_str, num, name, warning, items_str)
+    prefix = "🚚 DELIVERY ORDER" if fulfillment_type == "delivery" else "🏪 PICKUP ORDER"
+    return "{}\n\nOrder #{}-{}\nCustomer: {}{}\nItems:\n{}".format(
+        prefix, seq_str, num, name, warning, items_str)
 
 # ── Telegram senders ──────────────────────────────────────────────────────────
 def send_tg(msg):
@@ -325,61 +345,58 @@ def send_cook(msg):
     )
 
 # ── Main cron job ─────────────────────────────────────────────────────────────
-def run_backup():
-    """
-    Backup message: manually triggered.
-    Scans today's PAID + FULFILLED orders and sends
-    the standard message to both groups with تم الدفع مسبقا.
-    Does NOT change any fulfillment status in Shopify.
-    """
-    token   = get_shopify_token()
-    today   = get_today_cairo()
-    tag     = buunto_tag(today)
-    orders  = fetch_orders(tag, token)
-
-    # Only PAID + FULFILLED orders
-    backup_orders = [
-        o for o in orders
-        if o.get("displayFulfillmentStatus") == "FULFILLED"
-        and o.get("displayFinancialStatus") == "PAID"
-    ]
-
-    if not backup_orders:
-        send_tg("لا يوجد أوردرات مدفوعة ومسلمة اليوم")
-        send_cook("No paid & fulfilled orders found for today.")
-        return {"tag": tag, "backup_sent": 0}
-
-    # Send date header
-    send_tg(arabic_date_header(today))
-    send_cook("📦 Doja Cook — Backup Messages for {}".format(today.strftime("%a %d %b %Y")))
-
-    # Send each order as standard message — fmt_pending always shows
-    # تم الدفع مسبقا when displayFinancialStatus == PAID
-    for i, o in enumerate(backup_orders, 1):
-        send_tg(fmt_pending(o, i))
-        send_cook(fmt_cook(o, i))
-
-    return {"tag": tag, "backup_sent": len(backup_orders)}
-
 def run_cron():
     token         = get_shopify_token()
-    today         = get_today_cairo()       # actual current date (for header display)
-    delivery_date = get_delivery_date()     # tomorrow — the date drivers deliver
-    tag           = buunto_tag(delivery_date)
-    orders        = fetch_orders(tag, token)
-    pending  = [o for o in orders if o.get("displayFulfillmentStatus") != "FULFILLED"]
-    done     = [o for o in orders if o.get("displayFulfillmentStatus") == "FULFILLED"]
+    today         = get_today_cairo()
+    delivery_date = get_delivery_date()           # tomorrow
+    target_buunto = buunto_tag(delivery_date)     # "Mon Apr 28 2026"
+    target_iso    = iso_date(delivery_date)       # "2026-04-28"
 
-    # Also fetch unfulfilled orders with no delivery date tag
-    untagged = fetch_untagged_unfulfilled(token, tag)
-    # Avoid duplicates (in case an order somehow appears in both)
-    tagged_ids = {o["id"] for o in orders}
-    untagged   = [o for o in untagged if o["id"] not in tagged_ids]
+    # Fetch all unfulfilled orders — we'll classify them ourselves
+    all_unfulfilled = fetch_orders_raw("fulfillment_status:unfulfilled", token)
+    # Also fetch fulfilled orders that have today's buunto tag OR tomorrow's ISO date
+    # (for the checkmarks message)
+    all_fulfilled_tagged = fetch_orders_raw(
+        'tag:"{}" fulfillment_status:fulfilled'.format(target_buunto), token)
+    # Also check fulfilled orders with new theme note_attribute date
+    # (these won't have Buunto tags so we fetch recent fulfilled and classify)
+    recent_fulfilled = fetch_orders_raw("fulfillment_status:fulfilled", token)
 
-    all_pending = pending + untagged
-    total_orders = orders or all_pending
+    # Classify each unfulfilled order
+    delivery_pending  = []  # delivery orders for tomorrow
+    pickup_pending    = []  # pickup orders for tomorrow
+    no_date_orders    = []  # unfulfilled with no date at all (Raghda warning)
+    seen_ids          = set()
 
-    # Delivery group (Arabic)
+    for order in all_unfulfilled:
+        c = classify_order(order, target_iso, target_buunto)
+        if c["is_no_date_warning"]:
+            order["_no_date_warning"] = True
+            if order["id"] not in seen_ids:
+                no_date_orders.append(order)
+                seen_ids.add(order["id"])
+        elif c["has_matching_date"]:
+            order["_fulfillment_type"] = c["fulfillment_type"]
+            if order["id"] not in seen_ids:
+                if c["fulfillment_type"] == "pickup":
+                    pickup_pending.append(order)
+                else:
+                    delivery_pending.append(order)
+                seen_ids.add(order["id"])
+
+    # Classify fulfilled orders (checkmarks — delivery only, skip pickup)
+    done = []
+    for order in recent_fulfilled:
+        c = classify_order(order, target_iso, target_buunto)
+        if c["has_matching_date"] and c["fulfillment_type"] == "delivery":
+            if order["id"] not in seen_ids:
+                done.append(order)
+                seen_ids.add(order["id"])
+
+    all_pending  = delivery_pending + no_date_orders  # pickup handled separately
+    total_orders = all_pending + pickup_pending + done
+
+    # ── Delivery group (Arabic) — delivery orders only ──────────────────────
     send_tg(arabic_date_header(delivery_date))
     if not total_orders:
         send_tg("مفيش توصيلات النهارده 🎉")
@@ -388,21 +405,74 @@ def run_cron():
             send_tg(fmt_pending(o, i))
         for i, o in enumerate(done, len(all_pending) + 1):
             send_tg(fmt_fulfilled(o, i))
+        # Pickup orders: skip delivery group entirely
 
-    # Cook group (English)
+    # ── Cook group (English) — ALL orders including pickup ───────────────────
     send_cook("📦 Doja Cook — Orders for {}".format(
         delivery_date.strftime("%a %d %b %Y")))
     if not total_orders:
         send_cook("No orders today 🎉")
     else:
-        for i, o in enumerate(all_pending, 1):
-            send_cook(fmt_cook(o, i))
+        seq = 1
+        for o in delivery_pending:
+            send_cook(fmt_cook(o, seq, "delivery"))
+            seq += 1
+        for o in pickup_pending:
+            send_cook(fmt_cook(o, seq, "pickup"))
+            seq += 1
+        for o in no_date_orders:
+            send_cook(fmt_cook(o, seq, "delivery"))
+            seq += 1
 
-    # Mark all pending as fulfilled in Shopify
-    for o in all_pending:
+    # ── Mark all pending delivery+pickup+no-date as fulfilled in Shopify ─────
+    for o in delivery_pending + pickup_pending + no_date_orders:
         fulfill_order(o, token)
 
-    return {"delivery_date": tag, "pending": len(pending), "untagged": len(untagged), "fulfilled": len(done)}
+    return {
+        "delivery_date":    target_iso,
+        "delivery_pending": len(delivery_pending),
+        "pickup_pending":   len(pickup_pending),
+        "no_date":          len(no_date_orders),
+        "fulfilled":        len(done),
+    }
+
+# ── Backup endpoint ───────────────────────────────────────────────────────────
+def run_backup():
+    """
+    Manual only. Scans TODAY's PAID + FULFILLED orders and sends
+    standard messages to both groups with تم الدفع مسبقا.
+    Does NOT change fulfillment status in Shopify.
+    """
+    token         = get_shopify_token()
+    today         = get_today_cairo()
+    today_buunto  = buunto_tag(today)
+    today_iso     = iso_date(today)
+
+    all_orders = fetch_orders_raw("fulfillment_status:fulfilled", token)
+
+    backup_orders = []
+    for o in all_orders:
+        if o.get("displayFinancialStatus") != "PAID":
+            continue
+        c = classify_order(o, today_iso, today_buunto)
+        if c["has_matching_date"]:
+            o["_fulfillment_type"] = c["fulfillment_type"]
+            backup_orders.append(o)
+
+    if not backup_orders:
+        send_tg("لا يوجد أوردرات مدفوعة ومسلمة اليوم")
+        send_cook("No paid & fulfilled orders found for today.")
+        return {"today": today_iso, "backup_sent": 0}
+
+    send_tg(arabic_date_header(today))
+    send_cook("📦 Doja Cook — Backup Messages for {}".format(today.strftime("%a %d %b %Y")))
+
+    for i, o in enumerate(backup_orders, 1):
+        ft = o.get("_fulfillment_type", "delivery")
+        send_tg(fmt_pending(o, i))           # delivery group always gets Arabic
+        send_cook(fmt_cook(o, i, ft))        # cook gets delivery or pickup prefix
+
+    return {"today": today_iso, "backup_sent": len(backup_orders)}
 
 # ── Vercel handler ────────────────────────────────────────────────────────────
 class handler(BaseHTTPRequestHandler):
@@ -421,7 +491,8 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._respond(500, {"error": str(e)})
         else:
-            self._respond(200, {"status": "Doja Delivery Bot running", "trigger": "/api/cron", "backup": "/api/backup"})
+            self._respond(200, {"status": "Doja Delivery Bot running",
+                                "trigger": "/api/cron", "backup": "/api/backup"})
 
     def do_POST(self):
         self.do_GET()

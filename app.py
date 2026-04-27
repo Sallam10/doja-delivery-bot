@@ -140,13 +140,23 @@ def classify_order(order, target_iso, target_buunto):
       fulfillment_type   — "delivery" or "pickup"
       is_no_date_warning — True if no delivery date found at all (Raghda warning)
     Checks new theme customAttributes first, falls back to Buunto tags.
-    """
-    delivery_date_new = get_note_attribute(order, "doja_date")
 
-    if delivery_date_new:
-        # New theme order — derive fulfillment_type from delivery_choice key
+    Real key names from the store (verified April 28, 2026):
+      delivery_choice: "pickup_cairo" | "east_cairo_delivery" | "west_cairo_delivery"
+      delivery_date:   "2026-04-30"   (used by east/west delivery orders)
+      doja_date:       "2026-04-30"   (used by pickup orders)
+    """
+    # Read date — delivery orders use "delivery_date", pickup uses "doja_date"
+    delivery_date_new = (
+        get_note_attribute(order, "delivery_date") or
+        get_note_attribute(order, "doja_date")
+    )
+    # Read choice key
+    delivery_choice = get_note_attribute(order, "delivery_choice") or ""
+
+    if delivery_date_new or delivery_choice:
+        # New theme order
         has_matching_date  = (delivery_date_new == target_iso)
-        delivery_choice    = get_note_attribute(order, "doja_choice") or ""
         if "pickup" in delivery_choice.lower():
             fulfillment_type = "pickup"
         else:
@@ -155,7 +165,6 @@ def classify_order(order, target_iso, target_buunto):
     else:
         # Old theme / Buunto order
         tags_str = order.get("tags") or ""
-        # tags can be a list or comma-separated string depending on API version
         if isinstance(tags_str, list):
             tags_list = [t.strip() for t in tags_str]
             tags_str  = ", ".join(tags_list)

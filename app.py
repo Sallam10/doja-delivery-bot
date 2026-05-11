@@ -447,6 +447,86 @@ def run_cron():
     }
 
 # ── Backup endpoint ───────────────────────────────────────────────────────────
+def run_today():
+    """
+    Manual only — use when an order was placed after 11:50 PM and missed by the cron.
+    Runs exactly like run_cron() but checks TODAY's delivery date instead of tomorrow's.
+    Safe to run at any time after midnight.
+    """
+    token         = get_shopify_token()
+    today         = get_today_cairo()           # actual current date (which is now "tomorrow" from yesterday's cron)
+    target_buunto = buunto_tag(today)           # TODAY's buunto tag
+    target_iso    = iso_date(today)             # TODAY's ISO date
+
+    all_unfulfilled = fetch_orders_raw("fulfillment_status:unfulfilled", token)
+    all_fulfilled   = fetch_orders_raw("fulfillment_status:fulfilled", token)
+
+    delivery_pending = []
+    pickup_pending   = []
+    no_date_orders   = []
+    done             = []
+    seen_ids         = set()
+
+    for order in all_unfulfilled:
+        c = classify_order(order, target_iso, target_buunto)
+        if c["is_no_date_warning"]:
+            order["_no_date_warning"] = True
+            if order["id"] not in seen_ids:
+                no_date_orders.append(order)
+                seen_ids.add(order["id"])
+        elif c["has_matching_date"]:
+            order["_fulfillment_type"] = c["fulfillment_type"]
+            if order["id"] not in seen_ids:
+                if c["fulfillment_type"] == "pickup":
+                    pickup_pending.append(order)
+                else:
+                    delivery_pending.append(order)
+                seen_ids.add(order["id"])
+
+    for order in all_fulfilled:
+        c = classify_order(order, target_iso, target_buunto)
+        if c["has_matching_date"] and c["fulfillment_type"] == "delivery":
+            if order["id"] not in seen_ids:
+                done.append(order)
+                seen_ids.add(order["id"])
+
+    all_pending  = delivery_pending + no_date_orders
+    total_orders = all_pending + pickup_pending + done
+
+    # Delivery group (Arabic)
+    send_tg(arabic_date_header(today))
+    if not total_orders:
+        send_tg("مفيش توصيلات النهارده 🎉")
+    else:
+        for i, o in enumerate(all_pending, 1):
+            send_tg(fmt_pending(o, i))
+        for i, o in enumerate(done, len(all_pending) + 1):
+            send_tg(fmt_fulfilled(o, i))
+
+    # Cook group (English)
+    send_cook("📦 Doja Cook — Orders for {}".format(today.strftime("%a %d %b %Y")))
+    if not total_orders:
+        send_cook("No orders today 🎉")
+    else:
+        seq = 1
+        for o in delivery_pending:
+            send_cook(fmt_cook(o, seq, "delivery"))
+            seq += 1
+        for o in pickup_pending:
+            send_cook(fmt_cook(o, seq, "pickup"))
+            seq += 1
+        for o in no_date_orders:
+            send_cook(fmt_cook(o, seq, "delivery"))
+            seq += 1
+
+    # Mark pending as fulfilled
+    for o in delivery_pending + pickup_pending + no_date_orders:
+        fulfill_order(o, token)
+
+    return {"target_date": target_iso, "pending": len(delivery_pending),
+            "pickup": len(pickup_pending), "no_date": len(no_date_orders),
+            "fulfilled": len(done)}
+
 def run_backup():
     """
     Manual only. Scans TODAY's PAID + FULFILLED orders and sends
@@ -500,9 +580,17 @@ class handler(BaseHTTPRequestHandler):
                 self._respond(200, result)
             except Exception as e:
                 self._respond(500, {"error": str(e)})
+        elif path == "/api/today":
+            try:
+                result = run_today()
+                self._respond(200, result)
+            except Exception as e:
+                self._respond(500, {"error": str(e)})
         else:
             self._respond(200, {"status": "Doja Delivery Bot running",
-                                "trigger": "/api/cron", "backup": "/api/backup"})
+                                "trigger": "/api/cron",
+                                "backup": "/api/backup",
+                                "today": "/api/today"})
 
     def do_POST(self):
         self.do_GET()

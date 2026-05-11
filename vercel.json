@@ -1,6 +1,7 @@
 {
   "rewrites": [
-    { "source": "/api/cron", "destination": "/" },
-    { "source": "/api/backup", "destination": "/" }
+    { "source": "/api/cron",   "destination": "/" },
+    { "source": "/api/backup", "destination": "/" },
+    { "source": "/api/today",  "destination": "/" }
   ]
 }

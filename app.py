@@ -214,22 +214,40 @@ def transliterate_batch(texts):
         return texts
     numbered = "\n".join("{0}. {1}".format(n+1, texts[i]) for n, i in enumerate(idx))
     prompt = (
-        "You are helping Egyptian delivery drivers read names and addresses aloud.\n"
-        "Transliterate ONLY the English/Latin parts to Arabic phonetic spelling.\n"
-        "Keep Arabic text, numbers and punctuation exactly as-is.\n"
-        + ADDRESS_RULES + "\nFor names: " + NAME_EXAMPLES +
-        "\nReturn ONLY a numbered list, one result per line:\n" + numbered
+        "You are a transliteration tool for Egyptian delivery drivers.\n"
+        "Convert the English/Latin text in each numbered item to Arabic phonetic spelling.\n"
+        "Rules:\n"
+        "- Keep all Arabic text exactly as-is\n"
+        "- Keep all numbers and punctuation exactly as-is\n"
+        "- Apply these address mappings: " + ADDRESS_RULES + "\n"
+        "- For names use Egyptian phonetic pronunciation\n"
+        "IMPORTANT: Your response must be ONLY a numbered list matching the input numbers.\n"
+        "Do NOT add any explanation, greeting, or extra text.\n"
+        "Example input:\n"
+        "1. Laila Sherif\n"
+        "2. 15 Palm Street\n"
+        "Example output:\n"
+        "1. ليلى شريف\n"
+        "2. 15 شارع النخيل\n"
+        "Now transliterate these:\n" + numbered
     )
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     resp   = client.messages.create(
         model="claude-haiku-4-5-20251001", max_tokens=1500,
         messages=[{"role": "user", "content": prompt}])
-    lines  = [re.sub(r"^\d+\.\s*", "", l).strip()
-              for l in resp.content[0].text.strip().split("\n") if l.strip()]
+    raw_lines = [l.strip() for l in resp.content[0].text.strip().split("\n") if l.strip()]
+
+    # Safety check: if response doesn't look like a numbered list, return originals
+    valid_lines = [re.sub(r"^\d+\.\s*", "", l).strip() for l in raw_lines
+                   if re.match(r"^\d+\.", l)]
+    if len(valid_lines) < len(idx):
+        # Response was conversational or malformed — return originals unchanged
+        return texts
+
     result = list(texts)
     for n, oi in enumerate(idx):
-        if n < len(lines):
-            result[oi] = lines[n]
+        if n < len(valid_lines) and valid_lines[n]:
+            result[oi] = valid_lines[n]
     return result
 
 # ── Shared helpers ────────────────────────────────────────────────────────────

@@ -512,7 +512,7 @@ def run_webhook(order_data):
                  "Order #001-{}\nCustomer: {}\nItems:\n{}".format(
                  order_num_clean, cust_name, items_str))
     alert_msg = "🚨🚨🚨 ALERT\n\n" + cook_msg
-    send_cook(cook_msg)
+    send_cook(alert_msg)
     send_raghda(alert_msg)
     return {"action": "sent", "order": order_name, "customer": cust_name}
 

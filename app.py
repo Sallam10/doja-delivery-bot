@@ -13,7 +13,8 @@ TELEGRAM_BOT_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID      = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_COOK_CHAT_ID = os.environ.get("TELEGRAM_COOK_CHAT_ID", "")
 SHOPIFY_CLIENT_ID     = os.environ.get("SHOPIFY_CLIENT_ID", "")
-SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
+SHOPIFY_CLIENT_SECRET   = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
+TELEGRAM_RAGHDA_CHAT_ID = os.environ.get("TELEGRAM_RAGHDA_CHAT_ID", "")
 SHOPIFY_STORE         = "d0d0ba.myshopify.com"
 SHOPIFY_API_VER       = "2024-01"
 CAIRO_TZ              = ZoneInfo("Africa/Cairo")  # handles DST automatically
@@ -372,6 +373,16 @@ def send_cook(msg):
         timeout=10,
     )
 
+
+def send_raghda(msg):
+    """Send personal alert to Raghda on her private Telegram."""
+    if not TELEGRAM_RAGHDA_CHAT_ID:
+        return
+    requests.post(
+        "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_BOT_TOKEN),
+        json={"chat_id": TELEGRAM_RAGHDA_CHAT_ID, "text": msg},
+        timeout=10,
+    )
 # ── Main cron job ─────────────────────────────────────────────────────────────
 def run_cron():
     token         = get_shopify_token()
@@ -465,6 +476,46 @@ def run_cron():
     }
 
 # ── Backup endpoint ───────────────────────────────────────────────────────────
+def run_webhook(order_data):
+    """Handles Shopify order/created webhook. Acts on same-day pickup only."""
+    note_attrs = {a.get("name"): a.get("value") for a in (order_data.get("note_attributes") or [])}
+    delivery_choice = note_attrs.get("delivery_choice", "")
+    delivery_date   = note_attrs.get("delivery_date", "")
+    if "pickup" not in delivery_choice.lower():
+        return {"action": "ignored", "reason": "not a pickup order"}
+    today_iso = iso_date(get_today_cairo())
+    if delivery_date != today_iso:
+        return {"action": "ignored", "reason": "not same-day", "delivery_date": delivery_date}
+    financial_status = (order_data.get("financial_status") or "").upper()
+    if financial_status in ("VOIDED", "REFUNDED"):
+        return {"action": "ignored", "reason": "voided or refunded"}
+    order_name      = order_data.get("name", "#0000")
+    order_num_clean = re.sub(r"[^0-9]", "", order_name)
+    sh = order_data.get("shipping_address") or {}
+    cu = order_data.get("customer") or {}
+    cust_name = (
+        sh.get("name") or
+        (cu.get("first_name", "") + " " + cu.get("last_name", "")).strip() or
+        "Unknown"
+    )
+    items_lines = []
+    for item in order_data.get("line_items") or []:
+        qty     = item.get("quantity", 1)
+        title   = item.get("title", "")
+        variant = item.get("variant_title", "")
+        if variant and variant != "Default Title":
+            items_lines.append("- {}x {} ({})".format(qty, title, variant))
+        else:
+            items_lines.append("- {}x {}".format(qty, title))
+    items_str = "\n".join(items_lines)
+    cook_msg  = ("🏪 PICKUP ORDER\n\n"
+                 "Order #001-{}\nCustomer: {}\nItems:\n{}".format(
+                 order_num_clean, cust_name, items_str))
+    alert_msg = "🚨🚨🚨 ALERT\n\n" + cook_msg
+    send_cook(cook_msg)
+    send_raghda(alert_msg)
+    return {"action": "sent", "order": order_name, "customer": cust_name}
+
 def run_today():
     """
     Manual only — use when an order was placed after 11:50 PM and missed by the cron.
@@ -608,10 +659,21 @@ class handler(BaseHTTPRequestHandler):
             self._respond(200, {"status": "Doja Delivery Bot running",
                                 "trigger": "/api/cron",
                                 "backup": "/api/backup",
-                                "today": "/api/today"})
+                                "today": "/api/today", "webhook": "/api/webhook"})
 
     def do_POST(self):
-        self.do_GET()
+        path = self.path.split("?")[0].rstrip("/")
+        if path == "/api/webhook":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                order_data = json.loads(body)
+                result = run_webhook(order_data)
+                self._respond(200, result)
+            except Exception as e:
+                self._respond(500, {"error": str(e)})
+        else:
+            self.do_GET()
 
     def _respond(self, status, body):
         self.send_response(status)
